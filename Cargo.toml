@@ -1,6 +1,6 @@
 [package]
 name = "runtime"
-version = "2.1.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A modern structured-concurrency runtime: typed services, dependency-ordered startup, typed cancellation, typed pub/sub, snapshot state, and per-service restart policies."
@@ -10,7 +10,6 @@ categories = ["asynchronous", "concurrency"]
 
 [dependencies]
 fastrand = { version = "2", default-features = false, features = ["std"] }
-futures-core = { version = "0.3.31", default-features = false, features = ["std"] }
 thiserror = "2"
 tokio = { version = "1.43", default-features = false, features = ["rt", "sync", "macros", "time", "signal"] }
 tokio-util = { version = "0.7.13", default-features = false }
@@ -18,7 +17,6 @@ tracing = { version = "0.1.41", default-features = false, features = ["std", "at
 
 [dev-dependencies]
 tokio = { version = "1.43", default-features = false, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "signal"] }
-tokio-stream = "0.1.17"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 
 [[example]]

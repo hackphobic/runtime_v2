@@ -91,7 +91,8 @@ pub(crate) fn topo_sort(specs: &[ServiceSpec]) -> Result<Vec<usize>, DagError> {
         let mut remaining: Vec<ServiceName> = indegree
             .iter()
             .enumerate()
-            .filter_map(|(i, &d)| (d > 0).then(|| specs[i].name))
+            .filter(|&(_, &d)| d > 0)
+            .map(|(i, _)| specs[i].name)
             .collect();
         let mut seen = HashSet::new();
         remaining.retain(|x| seen.insert(*x));

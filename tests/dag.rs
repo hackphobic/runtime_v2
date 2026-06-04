@@ -39,12 +39,12 @@ make_service!(D, "d");
 
 // ============ helpers ============
 
-async fn run_and_immediately_cancel(rt: bee_runtime::Runtime) -> Result<(), RuntimeError> {
+async fn run_and_immediately_cancel(rt: runtime::Runtime) -> Result<(), RuntimeError> {
     let handle = rt.handle();
     let runner = tokio::spawn(rt.run());
     // Give the supervisor a moment to validate the DAG and either reject or start.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    handle.request_shutdown(bee_runtime::ShutdownReason::Requested);
+    handle.request_shutdown(runtime::ShutdownReason::Requested);
     runner.await.unwrap()
 }
 

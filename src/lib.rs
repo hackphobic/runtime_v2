@@ -3,8 +3,7 @@
 
 //! A modern, structured-concurrency runtime for service-oriented async applications.
 //!
-//! `runtime` is a rewrite of the original 2020 crate around modern Rust async
-//! primitives. It provides:
+//! It provides:
 //!
 //! - [`Service`] + [`ServiceContext`] — a trait for long-running units of work
 //!   driven by an async `run` method with typed errors and per-service
@@ -18,11 +17,6 @@
 //!   For *delta* streams where late subscribers see only new events.
 //! - [`State`] — snapshot primitive on top of [`tokio::sync::watch`].
 //!   For *current value* where new subscribers immediately see the latest.
-//! - [`ResourceHandle`] — an owning, usage-tracked handle for sharing
-//!   resources between services, with diagnostics for references that outlive
-//!   shutdown.
-//! - [`ShutdownStream`] — a [`Stream`](futures_core::Stream) adapter that ends
-//!   when an associated future fires.
 //!
 //! # Topic vs State
 //!
@@ -39,12 +33,13 @@
 //! # Readiness
 //!
 //! `RuntimeBuilder` topologically sorts service dependencies, but spawn order
-//! alone doesn't guarantee a dependent service sees its dep in a usable state.
-//! By default, services are auto-marked ready as soon as `run()` is invoked
-//! (preserving v3.0 semantics). Services with real init work should override
-//! [`Service::auto_ready`] to return `false` and call
-//! [`ServiceContext::mark_ready`] when init completes — dependents will block
-//! until then.
+//! alone doesn't guarantee a dependent service sees its dep in a *usable* state.
+//! Readiness is therefore **explicit**: a service is gated behind its declared
+//! dependencies, and each dependency stays un-ready until it calls
+//! [`ServiceContext::mark_ready`]. Any service that others depend on must call
+//! `mark_ready()` once its initialization (DB hydration, listener bind, initial
+//! sync) is complete; dependents block until then. A service that nothing
+//! depends on need not call it.
 //!
 //! # Quick example
 //!
@@ -72,6 +67,7 @@
 //!         ctx: ServiceContext,
 //!     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
 //!         async move {
+//!             ctx.mark_ready();
 //!             let mut n = 0u64;
 //!             loop {
 //!                 tokio::select! {
@@ -104,18 +100,14 @@
 #![forbid(unsafe_code)]
 
 pub mod event;
-pub mod resource;
 pub mod runtime;
 pub mod service;
-pub mod shutdown_stream;
 pub mod state;
 
 mod util;
 
 #[doc(inline)]
 pub use event::{Topic, TopicClosed, TopicConfig};
-#[doc(inline)]
-pub use resource::{ResourceHandle, WeakHandle};
 #[doc(inline)]
 pub use runtime::{
     DagError, Runtime, RuntimeBuilder, RuntimeError, RuntimeHandle, ShutdownReason,
@@ -125,7 +117,5 @@ pub use service::{
     DynServiceError, ExhaustedAction, OnError, RestartPolicy, Service, ServiceContext,
     ServiceName, ServiceStartError,
 };
-#[doc(inline)]
-pub use shutdown_stream::ShutdownStream;
 #[doc(inline)]
 pub use state::State;

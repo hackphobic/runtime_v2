@@ -2,9 +2,8 @@
 
 A modern, structured-concurrency runtime for service-oriented async Rust applications.
 
-`runtime` is a ground-up rewrite of the original 2020 crate. It keeps the
-spirit of the original — supervised services, a shared event bus, deterministic
-shutdown — but reimplements every primitive on modern Rust async idioms:
+`runtime` gives you supervised services, dependency-ordered startup, deterministic
+shutdown, and typed pub/sub — built throughout on modern Rust async idioms:
 
 - Native `async fn` in traits (no `async_trait` macro, no boxed futures in the
   public API)
@@ -30,8 +29,7 @@ The crate is `edition = "2024"`, `rust-version = "1.85"`, and
 | Delta pub/sub   | [`Topic<E>`] (typed broadcast, `Arc<E>` payloads)               |
 | Snapshot state  | [`State<T>`] (typed watch, always has current value)            |
 | Failure policy  | [`OnError`] per service (`ShutdownRuntime` \| `Restart` \| `Ignore`) |
-| Readiness       | `Service::auto_ready` + `ServiceContext::mark_ready` + DAG gating |
-| Resources       | [`ResourceHandle`] (`Arc<T>` + clone-site tracking for leaks)   |
+| Readiness       | `ServiceContext::mark_ready` + DAG gating (explicit)           |
 
 ### Topic vs State
 
@@ -48,12 +46,13 @@ Typical real-time API pattern: serve a `State::snapshot()` to a new client,
 ### Readiness
 
 `RuntimeBuilder` topologically sorts service dependencies, but spawn order
-alone doesn't guarantee a dependent service sees its dep in a usable state.
-By default, services are auto-marked ready as soon as `run()` is invoked
-(preserving v3.0 semantics). Services with real init work — DB hydration,
-listener bind, initial chain sync — should override `Service::auto_ready` to
-return `false` and call `ServiceContext::mark_ready` when init completes.
-Dependents wait until then before their own `run()` is invoked.
+alone doesn't guarantee a dependent service sees its dep in a *usable* state.
+Readiness is therefore explicit: a service is gated behind its declared
+dependencies, and each dependency stays un-ready until it calls
+`ServiceContext::mark_ready`. Any service that others depend on must call
+`mark_ready()` once its init (DB hydration, listener bind, initial sync) is
+complete; dependents wait until then before their own `run()` proceeds. A
+service that nothing depends on need not call it.
 
 ### Failure policy
 
@@ -98,6 +97,8 @@ impl Service for Ticker {
         ctx: ServiceContext,
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
         async move {
+            // `printer` depends on us, so signal readiness once we're set up.
+            ctx.mark_ready();
             let mut n = 0u64;
             loop {
                 tokio::select! {
@@ -207,12 +208,6 @@ or your own error type to unify them with `?`.
 - An actor framework. Services are independent units; communication between them
   is via your own channels ([`Topic`], `tokio::sync::mpsc`, `tokio::sync::watch`, etc.).
 - A service locator. Resources are injected explicitly when you construct each
-  `Arc<S>` for the builder. [`ResourceHandle`] is available if you want clone-
-  site tracking, but it is optional.
+  `Arc<S>` for the builder.
 - A multi-runtime abstraction. Built squarely on `tokio`.
-
-## Migration from 2.x and earlier
-
-This is a major version. The `Bus`, `Worker`, `Node`, and global `Resources`
-types are gone. See `CHANGELOG.md` for the mapping.
 

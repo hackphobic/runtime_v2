@@ -52,6 +52,7 @@ macro_rules! marker_service {
             ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
                 async move {
                     self.0.starts.fetch_add(1, Ordering::SeqCst);
+                    ctx.mark_ready();
                     ctx.cancelled().await;
                     self.0.stops.fetch_add(1, Ordering::SeqCst);
                     Ok(())

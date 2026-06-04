@@ -31,25 +31,21 @@ pub type ServiceName = &'static str;
 
 /// What the supervisor should do when a service's `run()` returns `Err(_)`.
 ///
-/// Defaults to [`OnError::ShutdownRuntime`], matching v3.0 behavior.
-#[derive(Clone, Copy, Debug)]
+/// Defaults to [`OnError::ShutdownRuntime`]: a failed service is treated as
+/// fatal unless it opts into restart or explicitly asks to be ignored.
+#[derive(Clone, Copy, Debug, Default)]
 pub enum OnError {
     /// Trigger a runtime-wide shutdown with [`ShutdownReason::ServiceFailed`].
-    /// This is the default and matches v3.0 semantics.
+    /// This is the default.
     ///
     /// [`ShutdownReason::ServiceFailed`]: crate::ShutdownReason::ServiceFailed
+    #[default]
     ShutdownRuntime,
     /// Restart the service after a backoff. Other services keep running.
     Restart(RestartPolicy),
     /// Log the error and let the service stay exited. Other services keep
     /// running. The service's readiness state (if set) is preserved.
     Ignore,
-}
-
-impl Default for OnError {
-    fn default() -> Self {
-        Self::ShutdownRuntime
-    }
 }
 
 /// Restart policy: exponential backoff with optional jitter and max retries.
@@ -149,9 +145,9 @@ impl ServiceContext {
 
     /// Mark this service as ready, allowing dependents to proceed.
     ///
-    /// Only needed if [`Service::auto_ready`] returns `false`. For services
-    /// with real init work (DB hydration, listener bind), override
-    /// `auto_ready` to return `false` and call this when init completes.
+    /// Any service that others depend on must call this once its initialization
+    /// (DB hydration, listener bind, initial sync) is complete — dependents
+    /// block until then. A service that nothing depends on need not call it.
     pub fn mark_ready(&self) {
         self.runtime.mark_ready(self.name);
     }
@@ -170,6 +166,10 @@ impl ServiceContext {
 ///     }
 /// }
 /// ```
+///
+/// If other services declare a dependency on this one, call
+/// [`ServiceContext::mark_ready`] once initialization is complete — dependents
+/// stay gated until then.
 ///
 /// The returned future is required to be `Send` so the supervisor can spawn
 /// it onto a multi-threaded runtime.
@@ -190,23 +190,8 @@ pub trait Service: Send + Sync + 'static {
         ctx: ServiceContext,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Whether the supervisor should mark this service ready automatically as
-    /// soon as `run()` is invoked.
-    ///
-    /// - `true` (default): the supervisor marks this service ready before
-    ///   handing control to `run()`. Suitable for services with no startup
-    ///   work, or where dependents only need to know "the task is alive".
-    /// - `false`: the service is responsible for calling
-    ///   [`ServiceContext::mark_ready`] when its initialization completes.
-    ///   Use this for services with real init work — DB hydration, listener
-    ///   bind, initial chain sync — where dependents must wait for the work
-    ///   to finish, not just for the task to start.
-    fn auto_ready(&self) -> bool {
-        true
-    }
-
     /// Policy for handling errors returned by `run()`. Defaults to
-    /// [`OnError::ShutdownRuntime`], matching v3.0 behavior.
+    /// [`OnError::ShutdownRuntime`].
     fn on_error(&self) -> OnError {
         OnError::ShutdownRuntime
     }
@@ -264,8 +249,6 @@ type BoxedFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Internal trait that erases the concrete `Service` type so the supervisor
 /// can store heterogeneous services uniformly.
 pub(crate) trait DynService: Send + Sync + 'static {
-    fn name(&self) -> ServiceName;
-    fn auto_ready(&self) -> bool;
     fn on_error(&self) -> OnError;
     fn run_boxed(
         self: Arc<Self>,
@@ -276,14 +259,6 @@ pub(crate) trait DynService: Send + Sync + 'static {
 pub(crate) struct ServiceAdapter<S: Service>(pub(crate) Arc<S>);
 
 impl<S: Service> DynService for ServiceAdapter<S> {
-    fn name(&self) -> ServiceName {
-        S::NAME
-    }
-
-    fn auto_ready(&self) -> bool {
-        self.0.auto_ready()
-    }
-
     fn on_error(&self) -> OnError {
         self.0.on_error()
     }

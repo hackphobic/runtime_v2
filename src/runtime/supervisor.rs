@@ -20,7 +20,6 @@ struct ServiceState {
     deps: Vec<ServiceName>,
     adapter: Arc<dyn DynService>,
     on_error: OnError,
-    auto_ready: bool,
     /// How many restart attempts have been made.
     attempts: u32,
 }
@@ -45,13 +44,11 @@ pub(crate) async fn run_supervised(rt: Runtime) -> Result<(), RuntimeError> {
             let spec = &specs[i];
             let adapter = Arc::clone(&spec.adapter);
             let on_error = adapter.on_error();
-            let auto_ready = adapter.auto_ready();
             ServiceState {
                 name: spec.name,
                 deps: spec.deps.clone(),
                 adapter,
                 on_error,
-                auto_ready,
                 attempts: 0,
             }
         })
@@ -64,7 +61,7 @@ pub(crate) async fn run_supervised(rt: Runtime) -> Result<(), RuntimeError> {
 
     // Initial spawn of every service.
     for (idx, state) in states.iter().enumerate() {
-        spawn_service(&mut joinset, idx, state, &handle, &root_cancel);
+        spawn_service(&mut joinset, idx, state, &handle, &root_cancel, None);
     }
 
     // Run the supervision loop.
@@ -94,40 +91,56 @@ pub(crate) async fn run_supervised(rt: Runtime) -> Result<(), RuntimeError> {
     }
 }
 
-/// Spawn a single service into the joinset.
+/// Spawn a service into the joinset, for either a fresh start (`delay = None`)
+/// or a restart (`delay = Some(backoff)`).
 ///
-/// The spawned task first awaits readiness of each declared dependency
-/// (cooperatively cancellable), then marks itself ready if `auto_ready` is
-/// true, then runs the service.
+/// The spawned task, in order: waits out the restart backoff if any (cancellable);
+/// awaits readiness of each declared dependency (cancellable); then runs the
+/// service. Readiness is the service's own responsibility — it calls
+/// [`ServiceContext::mark_ready`] when its init completes.
 fn spawn_service(
     joinset: &mut JoinSet<TaskResult>,
     idx: usize,
     state: &ServiceState,
     handle: &RuntimeHandle,
     root_cancel: &CancellationToken,
+    delay: Option<Duration>,
 ) {
     let name = state.name;
     let deps = state.deps.clone();
-    let auto_ready = state.auto_ready;
     let adapter = Arc::clone(&state.adapter);
     let handle = handle.clone();
-    let cancel = root_cancel.child_token();
+    let root_cancel = root_cancel.clone();
 
-    let ctx = ServiceContext {
-        cancel: cancel.clone(),
-        runtime: handle.clone(),
-        name,
+    let span = if delay.is_some() {
+        tracing::info_span!("service-restart", name)
+    } else {
+        let span = tracing::info_span!("service", name);
+        info!(parent: &span, deps = ?deps, "starting");
+        span
     };
-
-    let span = tracing::info_span!("service", name);
-    info!(parent: &span, deps = ?deps, "starting");
 
     joinset.spawn(
         async move {
+            // Restart backoff, if this is a restart.
+            if let Some(backoff) = delay {
+                tokio::select! {
+                    _ = root_cancel.cancelled() => return (idx, Ok(())),
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+            }
+
+            let cancel = root_cancel.child_token();
+            let ctx = ServiceContext {
+                cancel: cancel.clone(),
+                runtime: handle.clone(),
+                name,
+            };
+
             // Wait for declared dependencies to be ready (cooperatively cancellable).
             let wait_deps = async {
-                for dep in &deps {
-                    handle.await_ready(*dep).await;
+                for &dep in &deps {
+                    handle.await_ready(dep).await;
                 }
             };
 
@@ -137,10 +150,6 @@ fn spawn_service(
                     return (idx, Ok(()));
                 }
                 _ = wait_deps => {}
-            }
-
-            if auto_ready {
-                handle.mark_ready(name);
             }
 
             let result = adapter.run_boxed(ctx).await;
@@ -254,55 +263,9 @@ fn handle_failure(
                 "service failed; scheduling restart",
             );
 
-            // Spawn a small helper task that waits for the backoff (cancellable)
-            // and then notifies us via the joinset by ... directly re-spawning
-            // the service. We hold state immutably across the spawn so we can
-            // clone what we need first.
-            let name = state.name;
-            let deps = state.deps.clone();
-            let auto_ready = state.auto_ready;
-            let adapter = Arc::clone(&state.adapter);
-            let handle_cloned = handle.clone();
-            let root_cancel_cloned = root_cancel.clone();
-
-            joinset.spawn(
-                async move {
-                    // Wait for backoff or shutdown, whichever first.
-                    tokio::select! {
-                        _ = root_cancel_cloned.cancelled() => {
-                            return (idx, Ok(()));
-                        }
-                        _ = tokio::time::sleep(backoff) => {}
-                    }
-
-                    // Now actually run the service (similar to spawn_service).
-                    let cancel = root_cancel_cloned.child_token();
-                    let ctx = ServiceContext {
-                        cancel: cancel.clone(),
-                        runtime: handle_cloned.clone(),
-                        name,
-                    };
-
-                    let wait_deps = async {
-                        for dep in &deps {
-                            handle_cloned.await_ready(*dep).await;
-                        }
-                    };
-
-                    tokio::select! {
-                        _ = cancel.cancelled() => return (idx, Ok(())),
-                        _ = wait_deps => {}
-                    }
-
-                    if auto_ready {
-                        handle_cloned.mark_ready(name);
-                    }
-
-                    let result = adapter.run_boxed(ctx).await;
-                    (idx, result)
-                }
-                .instrument(tracing::info_span!("service-restart", name)),
-            );
+            // Re-spawn the service after the backoff (same task body as the
+            // initial spawn, with the restart delay applied up front).
+            spawn_service(joinset, idx, &states[idx], handle, root_cancel, Some(backoff));
 
             None
         }

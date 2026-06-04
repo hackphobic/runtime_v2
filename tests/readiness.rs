@@ -74,8 +74,8 @@ async fn await_ready_for_unknown_service_returns_immediately() {
 
 // ============ supervisor-driven readiness tests ============
 
-/// A service whose `auto_ready` is overridden to false; it waits N ms before
-/// marking itself ready, recording when ready was marked.
+/// A service that waits N ms before marking itself ready, recording when ready
+/// was marked.
 struct DelayedReady {
     delay: Duration,
     marked_ready: Arc<AtomicBool>,
@@ -84,10 +84,6 @@ struct DelayedReady {
 impl Service for DelayedReady {
     const NAME: &'static str = "delayed";
     type Error = Infallible;
-
-    fn auto_ready(&self) -> bool {
-        false
-    }
 
     fn run(
         self: Arc<Self>,
@@ -181,15 +177,15 @@ async fn dependent_waits_until_dep_marks_ready() {
     runner.await.unwrap().unwrap();
 }
 
-// ============ auto_ready=true behaves like v3 (no gating) ============
+// ============ a dep that never marks ready gates its dependent ============
 
-struct AutoReadyDep {
-    /// We do a small simulated init that does NOT involve mark_ready.
+/// A service that runs (looping on cancellation) but never calls `mark_ready`.
+struct NeverReady {
     started: Arc<AtomicBool>,
 }
 
-impl Service for AutoReadyDep {
-    const NAME: &'static str = "auto-dep";
+impl Service for NeverReady {
+    const NAME: &'static str = "never-ready";
     type Error = Infallible;
     fn run(
         self: Arc<Self>,
@@ -203,22 +199,26 @@ impl Service for AutoReadyDep {
     }
 }
 
+/// With explicit readiness, a dependent stays gated until its dep marks ready.
+/// A dep that never marks ready never releases its dependent — but shutdown
+/// still drains everything cleanly.
 #[tokio::test]
-async fn auto_ready_dep_is_ready_immediately_so_dependents_dont_block() {
-    let started = Arc::new(AtomicBool::new(false));
+async fn dependent_stays_gated_until_dep_ready_and_shutdown_drains() {
+    let dep_started = Arc::new(AtomicBool::new(false));
+    let dependent_idx = Arc::new(AtomicUsize::new(usize::MAX));
 
-    let dep = Arc::new(AutoReadyDep {
-        started: started.clone(),
+    let dep = Arc::new(NeverReady {
+        started: dep_started.clone(),
     });
     let dependent = Arc::new(Dependent {
         start_order: Arc::new(AtomicUsize::new(0)),
-        start_index: Arc::new(AtomicUsize::new(usize::MAX)),
+        start_index: dependent_idx.clone(),
     });
 
     let rt = RuntimeBuilder::new()
         .service(dep)
         .unwrap()
-        .service_with_deps(dependent, &["auto-dep"])
+        .service_with_deps(dependent, &["never-ready"])
         .unwrap()
         .shutdown_timeout(Duration::from_secs(2))
         .build();
@@ -226,17 +226,19 @@ async fn auto_ready_dep_is_ready_immediately_so_dependents_dont_block() {
     let handle = rt.handle();
     let runner = tokio::spawn(rt.run());
 
-    // Wait briefly; both should be running quickly.
+    // The dep runs, but since it never marks ready the dependent must NOT start.
     assert!(
-        wait_for(
-            || handle.is_ready("auto-dep") && handle.is_ready("dependent"),
-            Duration::from_secs(1),
-        )
-        .await,
-        "both services should reach ready quickly with auto_ready",
+        wait_for(|| dep_started.load(Ordering::SeqCst), Duration::from_secs(1)).await,
+        "dep should have started running",
     );
-    assert!(started.load(Ordering::SeqCst));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        dependent_idx.load(Ordering::SeqCst),
+        usize::MAX,
+        "dependent must stay gated while its dep is never ready",
+    );
 
+    // Shutdown still drains both tasks within the timeout.
     handle.request_shutdown(ShutdownReason::Requested);
     runner.await.unwrap().unwrap();
 }

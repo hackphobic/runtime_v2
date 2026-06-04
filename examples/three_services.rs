@@ -6,12 +6,12 @@
 //
 // Then Ctrl-C to shut down cleanly.
 //
-// Demonstrates the three v3.1 primitives:
+// Demonstrates:
 // 1. `Topic<E>`     — live delta stream from `chain-source`.
 // 2. `State<T>`     — current snapshot, served by `state-store`.
 // 3. `OnError::Restart` — `chain-source` restarts on transient errors.
-// 4. Readiness gating — `state-store` does fake "hydration" before marking
-//    ready; `ws-api` waits for it.
+// 4. Readiness gating — `state-store` does fake "hydration", then calls
+//    `mark_ready`; `ws-api` (which depends on it) waits for that.
 
 use std::{
     sync::{
@@ -117,11 +117,6 @@ impl Service for StateStore {
     type Error = StateStoreError;
 
     // Default OnError = ShutdownRuntime — a state-store error IS fatal.
-
-    // We override auto_ready: dependents must wait for hydration to complete.
-    fn auto_ready(&self) -> bool {
-        false
-    }
 
     fn run(
         self: Arc<Self>,
